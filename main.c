@@ -33,7 +33,25 @@
 #include "math.h"
 //#include "boards/pico_ice.h"
 
+#include "hardware/pio.h"
+#include "hardware/clocks.h"
+#include "ws2812.pio.h"
+
 #define I2C_HW i2c1
+
+#define IS_RGBW false
+#define NUM_PIXELS 12
+#define WS2812_PIN 17
+static inline void put_pixel(uint32_t pixel_grb) {
+    pio_sm_put_blocking(pio0, 0, pixel_grb << 8u);
+}
+static inline uint32_t urgb_u32(uint8_t r, uint8_t g, uint8_t b) {
+    return
+            ((uint32_t) (r) << 8) |
+            ((uint32_t) (g) << 16) |
+            (uint32_t) (b);
+}
+
 
 // Sensor has an address of 0x44
 #define OPT_ADDR _u(0x44)
@@ -82,6 +100,45 @@ int get_adc_code_opt4048(uint8_t channel, uint32_t *adc_code) {
     return ret;
 }
 
+int temp2rgb(uint32_t temp, uint8_t *r, uint8_t *g, uint8_t *b) {
+    temp /= 100;
+    if (temp <= 66) *r = 255;
+    else {
+        double rd = temp - 60;
+        rd = 330*pow(rd, -0.1332);
+        if (rd <0) *r = 0;
+        else if (rd > 255) *r = 255;
+        else *r = (int)rd;
+    }
+
+    double gd;
+    if (temp <= 66) gd = 99.47 * log(temp) -161.12;
+    else {
+        gd = temp -60;
+        gd = 288.12 * pow(gd, -0.0755);
+    }
+
+    if (gd <0) *g = 0;
+    else if (gd > 255) *g = 255;
+    else *g = (int)gd;
+
+    double bd;
+    if (temp >= 66) bd = 255;
+    else {
+        if (temp <= 19) bd = 0;
+        else {
+            bd = temp - 10;
+            bd = 138.52 * log(bd) - 305.05;
+        }
+    }
+
+    if (bd <0) *b = 0;
+    else if (bd > 255) *b = 255;
+    else *b = (int)bd;
+
+    return 0;
+}
+
 int main(void) {
     stdio_init_all(); // uses CDC0, next available is CDC1
     tusb_init();
@@ -104,6 +161,12 @@ int main(void) {
 
     ice_led_init();
 
+    PIO pio = pio0;
+    int sm = 0;
+    uint offset = pio_add_program(pio, &ws2812_program);
+
+    ws2812_program_init(pio, sm, offset, WS2812_PIN, 800000, IS_RGBW);
+
     // This example will use I2C0 on the default SDA and SCL pins (GP4, GP5 on a Pico)
     i2c_init(I2C_HW, 100 * 1000);
     gpio_init(ICE_PMOD3B_I2C_SDA_PIN);
@@ -125,9 +188,23 @@ int main(void) {
     uint32_t code[4];
     int ret, i;
     double x, y, z, cie_x, cie_y, lux, num, den, n, temp;
+    uint8_t r, g, b;
+    uint16_t temperature = 1000;
     while(true) {
-        if (cntr == 500) { // Every ~500ms
+        if (cntr == 4000) { // Every ~xms
             
+            temp2rgb(temperature, &r, &g, &b);
+            for (int i=0; i<NUM_PIXELS; i++) {
+                put_pixel(urgb_u32(r, g, b));
+            }
+            temperature += 500;
+            if (temp > 12000)
+            temperature = 2000;
+            // Let the sensor measure the temp
+            for (int i=0; i<20; i++) { // Settle for 20ms, conversion should happen in much less time
+                sleep_ms(1); tud_task();
+            }
+
             // Get the raw RGBW values
             for (i=0; i<4; i++) get_adc_code_opt4048(i, (code+i));
             
